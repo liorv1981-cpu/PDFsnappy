@@ -829,9 +829,14 @@ body::before {
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
+    a.style.display = 'none';
     document.body.appendChild(a);
-    a.click();
-    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 100);
+    // Use setTimeout to ensure iOS Safari processes the click
+    setTimeout(() => {
+      a.click();
+      // Delay cleanup — iOS Safari needs time to initiate the download
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
+    }, 100);
   }
 
   // ─── Tab Switching ─────────────────────────────────────
@@ -964,15 +969,21 @@ body::before {
           canvas.width = w;
           canvas.height = h;
           const ctx = canvas.getContext('2d');
+
+          // Fill white background so PNGs with transparency don't turn black
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, w, h);
           ctx.drawImage(img, 0, 0, w, h);
 
           // Always output as JPEG for best compression
           const dataURL = canvas.toDataURL('image/jpeg', quality);
-          resolve({ dataURL, w, h });
 
-          // Cleanup
+          // Cleanup to free memory
           canvas.width = 0;
           canvas.height = 0;
+          img.src = '';
+
+          resolve({ dataURL, w, h });
         };
         img.onerror = () => reject(new Error(`Failed to load image: ${file.name}`));
         img.src = reader.result;
@@ -998,16 +1009,7 @@ body::before {
     imgProgPct.textContent = '0%';
 
     try {
-      // First image determines initial orientation
-      const firstCompressed = await compressImage(imgState.files[0].file, maxDim, quality);
-
-      let pdf;
-      if (pageSize === 'fit') {
-        pdf = new jsPDF({ unit: 'px', format: [firstCompressed.w, firstCompressed.h], hotfixes: ['px_scaling'] });
-      } else {
-        const landscape = firstCompressed.w > firstCompressed.h;
-        pdf = new jsPDF({ orientation: landscape ? 'landscape' : 'portrait', unit: 'mm', format: pageSize });
-      }
+      let pdf = null;
 
       for (let i = 0; i < imgState.files.length; i++) {
         const item = imgState.files[i];
@@ -1015,7 +1017,15 @@ body::before {
 
         const compressed = await compressImage(item.file, maxDim, quality);
 
-        if (i > 0) {
+        if (i === 0) {
+          // Create PDF based on first image orientation
+          if (pageSize === 'fit') {
+            pdf = new jsPDF({ unit: 'px', format: [compressed.w, compressed.h], hotfixes: ['px_scaling'] });
+          } else {
+            const landscape = compressed.w > compressed.h;
+            pdf = new jsPDF({ orientation: landscape ? 'landscape' : 'portrait', unit: 'mm', format: pageSize });
+          }
+        } else {
           if (pageSize === 'fit') {
             pdf.addPage([compressed.w, compressed.h]);
           } else {
@@ -1031,7 +1041,7 @@ body::before {
           pdf.addImage(compressed.dataURL, 'JPEG', 0, 0, compressed.w, compressed.h);
         } else {
           // Fit image within page with margins
-          const margin = pageSize === 'fit' ? 0 : 10; // mm
+          const margin = 10; // mm
           const availW = pageW - 2 * margin;
           const availH = pageH - 2 * margin;
           const ratio = Math.min(availW / compressed.w, availH / compressed.h);
@@ -1041,6 +1051,9 @@ body::before {
           const offsetY = margin + (availH - drawH) / 2;
           pdf.addImage(compressed.dataURL, 'JPEG', offsetX, offsetY, drawW, drawH);
         }
+
+        // Free the dataURL string from memory
+        compressed.dataURL = null;
 
         const pct = Math.round(((i + 1) / imgState.files.length) * 100);
         imgProgFill.style.width = pct + '%';
@@ -1058,6 +1071,8 @@ body::before {
       console.error(err);
       showToast('Error creating PDF: ' + err.message, 'error');
       imgProgText.textContent = 'Error occurred.';
+      // Hide progress bar on error after a delay
+      setTimeout(() => imgProgress.classList.remove('active'), 3000);
     } finally {
       imgConvert.classList.remove('loading');
       imgConvert.disabled = false;
